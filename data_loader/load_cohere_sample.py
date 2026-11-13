@@ -1,16 +1,16 @@
 """Cohere-10M Dataset Loader for AlloyDB.
 
-This script loads the Cohere Wikipedia dataset (768-dim embeddings) into AlloyDB.
-It supports streaming directly from Hugging Face or generating realistic synthetic
-samples matching the exact schema for rapid initialization and offline testing.
+This script loads or generates the Cohere Wikipedia dataset (768-dim embeddings) for AlloyDB.
+It supports streaming from Hugging Face or self-contained generation matching the exact schema
+without requiring external C-extension libraries.
 """
 
 import argparse
-import json
 import logging
+import math
 import os
+import random
 import sys
-import numpy as np
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -34,11 +34,10 @@ SAMPLE_TOPICS = [
 
 def generate_normalized_vector(dim=768, seed=None):
     """Generates a unit-normalized random vector matching Cohere's 768-dim embedding space."""
-    if seed is not None:
-        np.random.seed(seed)
-    vec = np.random.randn(dim).astype(np.float32)
-    norm = np.linalg.norm(vec)
-    return (vec / (norm + 1e-10)).tolist()
+    rng = random.Random(seed) if seed is not None else random.Random()
+    raw = [rng.gauss(0.0, 1.0) for _ in range(dim)]
+    norm = math.sqrt(sum(x * x for x in raw))
+    return [round(x / (norm + 1e-10), 6) for x in raw]
 
 
 def generate_synthetic_batch(start_id, batch_size):
@@ -48,11 +47,11 @@ def generate_synthetic_batch(start_id, batch_size):
         curr_id = start_id + i
         topic_idx = curr_id % len(SAMPLE_TOPICS)
         title, base_text, url, views = SAMPLE_TOPICS[topic_idx]
-        
+
         text = f"{base_text} (Passage chunk #{curr_id}: Analysis of domain principles and algorithmic implementations.)"
         views_jitter = views + (curr_id * 17) % 5000
         emb = generate_normalized_vector(dim=768, seed=curr_id)
-        
+
         batch.append({
             "id": curr_id,
             "title": title,
@@ -68,16 +67,11 @@ def generate_synthetic_batch(start_id, batch_size):
 def format_sql_insert(row):
     """Formats a single row dictionary into a PostgreSQL INSERT statement."""
     vec_str = "[" + ",".join(f"{x:.6f}" for x in row["embedding"]) + "]"
-    # Escape single quotes
     title = row["title"].replace("'", "''")
     text = row["text"].replace("'", "''")
     url = row["url"].replace("'", "''")
-    
-    return f"""
-    INSERT INTO cohere_wikipedia (id, title, text, url, views, langs, embedding)
-    VALUES ({row['id']}, '{title}', '{text}', '{url}', {row['views']}, '{row['langs']}', '{vec_str}'::vector)
-    ON CONFLICT (id) DO UPDATE SET views = EXCLUDED.views;
-    """
+
+    return f"INSERT INTO cohere_wikipedia (id, title, text, url, views, langs, embedding) VALUES ({row['id']}, '{title}', '{text}', '{url}', {row['views']}, '{row['langs']}', '{vec_str}'::vector) ON CONFLICT (id) DO UPDATE SET views = EXCLUDED.views;"
 
 
 def main():
